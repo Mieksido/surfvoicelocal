@@ -1,23 +1,18 @@
 #!/usr/bin/env node
 /**
- * 下载语音模型（模型不进 git，靠 Release 资产分发）。
+ * 下载语音模型 / 运行库（不进 git，靠 Release 资产分发）。
  *
  * 用法：
- *   node scripts/fetch-models.mjs                  # 按 models.json 下载并解压到 models/
- *   node scripts/fetch-models.mjs --check          # 只校验本地已下载的分卷
- *   node scripts/fetch-models.mjs --dir D:\models  # 换目标目录
+ *   node scripts/fetch-models.mjs            # 按 models.json 下载并解压到 models/
+ *   node scripts/fetch-models.mjs --check    # 只校验本地已下载的归档
+ *   node scripts/fetch-models.mjs --dir D:\models
  *
- * models.json 格式（放仓库根目录，发版时由维护者生成）：
- *   {
- *     "archive": "voice-local-models.tar.gz",
- *     "parts": [
- *       { "url": "https://github.com/.../part1", "sha256": "…", "size": 1900000000 },
- *       { "url": "https://github.com/.../part2", "sha256": "…", "size": 1900000000 }
- *     ]
- *   }
+ * models.json 两种格式都支持：
+ *   { "archives": [ { name, url, sha256, size }, ... ] }   ← 推荐（每个资产 < 2GB）
+ *   { "archive": "x.tar.gz", "parts": [ { url, sha256, size }, ... ] }  ← 单个大文件分卷
  *
- * 为什么分卷：GitHub 单个 Release 资产上限 2GB，本地包 7.3GB 只能拆开传；
- * 脚本按顺序下载 → 校验 → 拼接 → 解压，用户只跑一条命令。
+ * 解压规则：.zip 用 PowerShell/unzip，.tar.gz/.tgz 用 tar，都解到 models/（多个归档叠加）。
+ * 所有资产都校验 sha256；失败就停下，不会留下半套文件当成功。
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -36,26 +31,18 @@ const manifestFile = path.resolve(valueOf('manifest', 'models.json'));
 const checkOnly = has('check');
 
 if (!fs.existsSync(manifestFile)) {
-  console.error(`找不到 ${manifestFile}。模型清单应由维护者在 Release 里提供；` +
-    '如果你是从源码装的，先看 README「模型」一节。');
+  console.error(`找不到 ${manifestFile}：仓库里应该有 models.json（见 README「模型」）。`);
   process.exit(2);
 }
 
 const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
-const parts = Array.isArray(manifest.parts) ? manifest.parts : [];
-if (!parts.length) {
-  console.error('models.json 里没有 parts');
-  process.exit(2);
-}
-
 const dlDir = path.join(root, '.download');
 fs.mkdirSync(dlDir, { recursive: true });
 
 const sha256 = (file) => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
-const human = (n) => `${(n / 1024 / 1024 / 1024).toFixed(2)}GB`;
+const human = (n) => `${(n / 1024 / 1024).toFixed(1)}MB`;
 
 function download(url, dest) {
-  // 不引第三方依赖：用 PowerShell / curl 都行；优先 curl（Win10+ 自带）
   try {
     execFileSync('curl', ['-L', '--fail', '--retry', '2', '-o', dest, url], { stdio: 'inherit' });
     return true;
@@ -64,57 +51,72 @@ function download(url, dest) {
   }
 }
 
-let failed = false;
-parts.forEach((part, index) => {
-  const name = `part-${String(index + 1).padStart(2, '0')}`;
-  const dest = path.join(dlDir, name);
-  const label = `[${index + 1}/${parts.length}] ${part.url}`;
-  if (!fs.existsSync(dest) || (part.size && fs.statSync(dest).size !== Number(part.size))) {
-    if (checkOnly) { console.error(`✗ 缺分卷 ${name}`); failed = true; return; }
-    console.log(`下载 ${label}`);
-    if (!download(part.url, dest)) { console.error(`✗ 下载失败：${part.url}`); failed = true; return; }
+/** 下载（或复用）+ 校验一个资产 */
+function fetchAsset({ url, name, sha256: expectHash, size }) {
+  const dest = path.join(dlDir, name || path.basename(new URL(url).pathname) || 'archive');
+  const wrongSize = size && fs.existsSync(dest) && fs.statSync(dest).size !== Number(size);
+  if (!fs.existsSync(dest) || wrongSize) {
+    if (checkOnly) { console.error(`✗ 缺 ${path.basename(dest)}`); return null; }
+    console.log(`下载 ${url}`);
+    if (!download(url, dest)) { console.error(`✗ 下载失败：${url}`); return null; }
   }
-  if (part.sha256) {
+  if (expectHash) {
     const actual = sha256(dest);
-    if (actual.toLowerCase() !== String(part.sha256).toLowerCase()) {
-      console.error(`✗ ${name} 校验失败（${actual.slice(0, 12)}…）`);
-      failed = true;
-      return;
+    if (actual.toLowerCase() !== String(expectHash).toLowerCase()) {
+      console.error(`✗ ${path.basename(dest)} 校验失败（${actual.slice(0, 12)}…）`);
+      return null;
     }
   }
-  console.log(`✓ ${name} ${part.size ? human(Number(part.size)) : ''}`);
-});
-
-if (failed) {
-  console.error('\n有分卷没准备好；修好后重跑同一条命令（已下载的会跳过）。');
-  process.exit(1);
-}
-if (checkOnly) { console.log('\n✅ 所有分卷都在且校验通过'); process.exit(0); }
-
-const archive = path.join(dlDir, String(manifest.archive || 'models.tar.gz'));
-if (!fs.existsSync(archive)) {
-  console.log('拼接分卷…');
-  const out = fs.openSync(archive, 'w');
-  for (let i = 0; i < parts.length; i += 1) {
-    const part = path.join(dlDir, `part-${String(i + 1).padStart(2, '0')}`);
-    fs.writeSync(out, fs.readFileSync(part));
-  }
-  fs.closeSync(out);
+  console.log(`✓ ${path.basename(dest)} ${size ? human(Number(size)) : ''}`);
+  return dest;
 }
 
-console.log(`解压到 ${root} …`);
-fs.mkdirSync(root, { recursive: true });
-const lower = archive.toLowerCase();
-if (lower.endsWith('.zip')) {
-  if (process.platform === 'win32') {
-    execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-      `Expand-Archive -LiteralPath '${archive.replace(/'/g, "''")}' -DestinationPath '${root.replace(/'/g, "''")}' -Force`], { stdio: 'inherit' });
+function extract(archive) {
+  fs.mkdirSync(root, { recursive: true });
+  const lower = archive.toLowerCase();
+  if (lower.endsWith('.zip')) {
+    if (process.platform === 'win32') {
+      execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+        `Expand-Archive -LiteralPath '${archive.replace(/'/g, "''")}' -DestinationPath '${root.replace(/'/g, "''")}' -Force`], { stdio: 'inherit' });
+    } else {
+      execFileSync('unzip', ['-o', '-q', archive, '-d', root], { stdio: 'inherit' });
+    }
   } else {
-    execFileSync('unzip', ['-o', '-q', archive, '-d', root], { stdio: 'inherit' });
+    execFileSync('tar', ['-xzf', archive, '-C', root], { stdio: 'inherit' });
+  }
+}
+
+let failed = false;
+
+if (Array.isArray(manifest.archives) && manifest.archives.length) {
+  for (const [i, item] of manifest.archives.entries()) {
+    const file = fetchAsset(item);
+    if (!file) { failed = true; continue; }
+    if (checkOnly) continue;
+    console.log(`解压 ${item.name} …`);
+    extract(file);
   }
 } else {
-  execFileSync('tar', ['-xzf', archive, '-C', root], { stdio: 'inherit' });
+  const parts = Array.isArray(manifest.parts) ? manifest.parts : [];
+  if (!parts.length) { console.error('models.json 里既没有 archives 也没有 parts'); process.exit(2); }
+  const downloaded = [];
+  for (const [i, part] of parts.entries()) {
+    const file = fetchAsset({ ...part, name: `part-${String(i + 1).padStart(2, '0')}` });
+    if (!file) { failed = true; break; }
+    downloaded.push(file);
+  }
+  if (!failed && !checkOnly) {
+    const archive = path.join(dlDir, String(manifest.archive || 'models.tar.gz'));
+    const out = fs.openSync(archive, 'w');
+    for (const part of downloaded) fs.writeSync(out, fs.readFileSync(part));
+    fs.closeSync(out);
+    console.log('解压合并后的归档…');
+    extract(archive);
+  }
 }
 
-console.log(`\n✅ 模型就绪：${root}`);
-console.log('接下来：设置页「语音」里选本地/云端 → 启动；或直接跑 run.bat。');
+if (failed) {
+  console.error('\n有资产没准备好；修好后重跑同一条命令（已下载的会跳过）。');
+  process.exit(1);
+}
+console.log(checkOnly ? '\n✅ 所有资产都在且校验通过' : `\n✅ 模型就绪：${root}`);
