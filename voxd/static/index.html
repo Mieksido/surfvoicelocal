@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>voxd 试音台</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; font: 15px/1.6 system-ui, "Microsoft YaHei", sans-serif;
+         background: #14161a; color: #e6e8eb; display: flex; justify-content: center; }
+  main { width: min(760px, 92vw); padding: 32px 0 64px; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+  p.hint { color: #8b93a1; margin: 0 0 22px; font-size: 13px; }
+  textarea, select { width: 100%; box-sizing: border-box; background: #1c1f25; color: #e6e8eb;
+                     border: 1px solid #2b3038; border-radius: 8px; padding: 10px 12px; font: inherit; }
+  textarea { height: 92px; resize: vertical; }
+  .row { display: flex; gap: 10px; margin: 10px 0; }
+  .row > * { flex: 1; }
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 16px; }
+  .tags button { flex: 0 0 auto; background: #1c1f25; border: 1px solid #2b3038; color: #cdd3dc;
+                 border-radius: 999px; padding: 4px 12px; cursor: pointer; font-size: 13px; }
+  .tags button:hover { border-color: #4a5361; }
+  .go { display: flex; gap: 10px; align-items: center; }
+  .go button { background: #3b6ef6; border: 0; color: #fff; border-radius: 8px;
+               padding: 10px 22px; font-size: 15px; cursor: pointer; }
+  .go button:disabled { opacity: .5; cursor: default; }
+  #log { color: #8b93a1; font-size: 13px; }
+  #err { color: #ff7a7a; font-size: 13px; white-space: pre-wrap; }
+  audio { width: 100%; margin-top: 18px; }
+  pre { background: #1c1f25; border: 1px solid #2b3038; border-radius: 8px; padding: 10px;
+        font-size: 12px; overflow: auto; max-height: 180px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>voxd 试音台</h1>
+  <p class="hint">直接听服务端合成结果。标签作用于其后的文字，遇到下一个标签即替换。</p>
+
+  <div class="row">
+    <select id="voice"></select>
+    <select id="format">
+      <option value="wav">wav</option>
+      <option value="ogg">ogg（需要 ffmpeg）</option>
+    </select>
+  </div>
+
+  <textarea id="text">来了来了[笑]我还以为你今天不来了呢[pause:200]文件我放桌面了。</textarea>
+
+  <div class="tags" id="tags"></div>
+
+  <div class="go">
+    <button id="play">合成并播放</button>
+    <span id="log"></span>
+  </div>
+  <div id="err"></div>
+  <audio id="player" controls></audio>
+  <pre id="meta" hidden></pre>
+</main>
+<script>
+const TAGS = ['笑','开心','兴奋','温柔','小声','敷衍','不耐烦','认真','惊讶','叹气','难过','平静'];
+const $ = (id) => document.getElementById(id);
+const text = $('text');
+
+TAGS.forEach((t) => {
+  const b = document.createElement('button');
+  b.textContent = t;
+  b.onclick = () => {
+    const p = text.selectionStart ?? text.value.length;
+    text.value = text.value.slice(0, p) + `[${t}]` + text.value.slice(p);
+    text.focus();
+    text.selectionStart = text.selectionEnd = p + t.length + 2;
+  };
+  $('tags').appendChild(b);
+});
+
+async function loadVoices() {
+  try {
+    const r = await fetch('/v1/voices');
+    const d = await r.json();
+    $('voice').innerHTML = d.voices
+      .map((v) => `<option value="${v.id}"${v.id === d.default ? ' selected' : ''}>${v.id} · ${v.desc || ''}</option>`)
+      .join('');
+  } catch (e) {
+    $('err').textContent = '读不到音色列表：' + e.message;
+  }
+}
+
+$('play').onclick = async () => {
+  const btn = $('play');
+  btn.disabled = true;
+  $('err').textContent = '';
+  $('log').textContent = '合成中…';
+  const t0 = performance.now();
+  try {
+    const r = await fetch('/v1/speak/file', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ text: text.value, voice: $('voice').value, format: $('format').value })
+    });
+    if (!r.ok) {
+      let d = '';
+      try { d = (await r.json()).detail ?? ''; } catch {}
+      throw new Error(`HTTP ${r.status} ${d}`);
+    }
+    const blob = await r.blob();
+    const ms = Math.round(performance.now() - t0);
+    $('player').src = URL.createObjectURL(blob);
+    $('player').play().catch(() => {});
+    $('log').textContent = `${ms}ms · ${Math.round(Number(r.headers.get('x-duration-ms') || 0) / 100) / 10}s 音频` +
+      (r.headers.get('x-cached') === '1' ? ' · 缓存命中' : '');
+    const meta = JSON.parse(atob(r.headers.get('x-segments') || 'e30='));
+    $('meta').hidden = false;
+    $('meta').textContent = JSON.stringify(meta.map((m) => ({ i: m.i, text: m.text, tags: m.tags, t0: m.t0, t1: m.t1 })), null, 1);
+  } catch (e) {
+    $('err').textContent = '失败：' + e.message;
+    $('log').textContent = '';
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+loadVoices();
+</script>
+</body>
+</html>

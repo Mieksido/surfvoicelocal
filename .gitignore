@@ -1,0 +1,15 @@
+# 运行时/大文件：都不进仓库
+models/
+cache/
+logs/
+dataset/
+audition/
+voices/
+voicepack/
+tools/
+*.log
+*.pid
+run.pid
+config.toml
+.DS_Store
+Thumbs.db

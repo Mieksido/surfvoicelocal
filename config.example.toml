@@ -1,0 +1,74 @@
+# 复制为 config.toml 之后，把 token / cloud_access_key 换成你自己的。
+# 仓库里只放模板：真实密钥永远不进 git。
+
+# voxd —— 本地语音服务。改这里不用改代码。
+[server]
+host = "127.0.0.1"
+port = 8765
+token = ""              # 空 = 不鉴权（只 bind 127.0.0.1 时够用）
+
+[engine]
+# 主引擎 = CustomVoice：内置 9 个音色 + 自然语言 instruct 控语气
+primary = "gsv"
+# 克隆变体（想用自己的声线时）：ref.wav + ref_text → 无 instruct
+fallbacks = ["piper"]
+qwen3_path = "models/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+qwen3_base_path = "models/Qwen3-TTS-12Hz-0.6B-Base"
+device = "cuda:0"                 # 没 GPU 就写 "cpu"（会很慢）
+dtype = "bfloat16"
+attn = "sdpa"                     # 装了 flash-attn 可改 flash_attention_2
+gap_ms = 80                       # 句间留白
+piper_model = "models/zh_CN-huayan-medium.onnx"
+# CosyVoice2 独立 worker（emotion + 流式）；URL 由 scripts/cosy_worker.py 提供
+cosy_url = "http://127.0.0.1:8766"
+gsv_url = "http://127.0.0.1:9880"    # GPT-SoVITS 微调版（本地，1 秒出声）
+warmup = ["gsv"]                  # 启动后后台空跑一次，消除第一条的 4~6 秒预热
+# 云端：火山「豆包声音复刻模型 2.0」。resource id 必须是 seed-icl-2.0
+cloud_app_id = "3773727341"
+cloud_access_key = ""
+cloud_resource = "seed-icl-2.0"
+# 双引擎分流（默认关闭）：带 [语气] 标签且不超过这么多字的句子优先用 CosyVoice。
+#   0 = 关闭（全部按 voice 自己的 engine 走）。
+# 打开前想清楚：同一个音色会在两个引擎之间切换，**长句会突然换人**；而且 cosy 短句要 3 秒。
+# 打开后 short→cosy、long→piper，实测 3.55s / 0.24s（对比 cosy 长句 15s）。
+cosy_max_chars = 0    # 0 = 关闭双引擎切换（否则带标签的短句会换成 huayan-cosy 那个声音）
+
+[voice]
+default = "loli12-gsv"                # 不指定时用谁（聊天默认走 Piper：RTF 0.1；qwen3 的声音 RTF≈5，只适合离线）
+# 角色名 → 音色 id。三个宿主共用同一份人格映射。
+[voice.characters]
+xiaoyu = "loli12-gsv"
+
+[limits]
+max_chars = 2000                  # 单次请求最大字符（长句/有声书；QQ 侧另有 120 字限制）
+queue_max = 64
+
+[cache]
+dir = "cache"
+max_mb = 1024
+
+[ffmpeg]
+path = ""                         # 空 = 走 PATH；没有 ffmpeg 时 ogg/mp3 会返回 501
+
+# ─────────────────────────────────────────────────────────────
+# 插件引擎：任何外部 TTS 服务，只要遵守下面这条 HTTP 契约，
+# 就能在这里加一段配置直接接入，不用改 voxd 的代码。
+#
+#   POST {url}/say
+#   {"text":"...", "voice":{"id","ref_audio","ref_text","preset","design","speed"},
+#    "lang":"zh", "instruct":null, "rate":1.0, "pitch":0.0}
+#   ← wav 字节（或以 X-Sample-Rate 头 + 裸 PCM）
+#
+# kind 现在支持 "http"。caps 里的能力声明会被路由用到，
+# 必须和真实能力一致，否则会选错引擎。
+#
+# [engines.mytts]
+# kind = "http"
+# url = "http://127.0.0.1:9999"
+# clone = true          # 接受参考音频
+# instruct = false      # 接受语气指令
+# langs = ["zh", "en"]
+# max_chars = 500
+# sr = 24000
+# timeout = 120
+# headers = { Authorization = "Bearer xxx" }
