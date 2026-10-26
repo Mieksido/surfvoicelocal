@@ -71,6 +71,8 @@ function fetchAsset({ url, name, sha256: expectHash, size }) {
   return dest;
 }
 
+function toPosix(p) { return String(p).split(String.fromCharCode(92)).join("/"); }
+
 function extract(archive) {
   fs.mkdirSync(root, { recursive: true });
   const lower = archive.toLowerCase();
@@ -79,10 +81,12 @@ function extract(archive) {
       execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
         `Expand-Archive -LiteralPath '${archive.replace(/'/g, "''")}' -DestinationPath '${root.replace(/'/g, "''")}' -Force`], { stdio: 'inherit' });
     } else {
-      execFileSync('unzip', ['-o', '-q', archive, '-d', root], { stdio: 'inherit' });
+      execFileSync('unzip', ['-o', '-q', toPosix(archive), '-d', toPosix(root)], { stdio: 'inherit' });
     }
   } else {
-    execFileSync('tar', ['-xzf', archive, '-C', root], { stdio: 'inherit' });
+    // GNU tar 会把 'D:/...' 当成远程主机（host:path），必须用相对路径 + cwd。
+    const rel = path.relative(root, archive) || path.basename(archive);
+    execFileSync('tar', ['-xzf', toPosix(rel), '-C', '.'], { cwd: root, stdio: 'inherit' });
   }
 }
 
