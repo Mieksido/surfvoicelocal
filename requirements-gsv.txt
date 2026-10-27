@@ -1,0 +1,22 @@
+# GPT-SoVITS 推理依赖（本地包专用）。voxd 的依赖见 requirements.txt。
+# CPU 版 torch：Windows 上 PyPI 默认就是 CPU 轮子；有 NVIDIA 卡想用 CUDA，
+# 先删掉这两行再手动装 cu 版（见 README「显卡」）。
+torch==2.5.1
+torchaudio==2.5.1
+numpy==1.26.4
+scipy>=1.11
+librosa==0.10.2
+soundfile>=0.12
+transformers>=4.40,<4.46
+tokenizers>=0.15
+safetensors>=0.4
+einops>=0.7
+g2p-en>=2.1
+omegaconf>=2.3
+pyyaml>=6
+tqdm>=4.66
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.6
+cn2an>=0.5
+jieba>=0.42

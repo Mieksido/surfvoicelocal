@@ -1,0 +1,7 @@
+# voxd 运行时依赖（cloud 包）。torch/GSV 相关在 requirements-gsv.txt（只有本地包有）。
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.6
+numpy>=1.26,<2.1
+soundfile>=0.12
+piper-tts>=1.2
