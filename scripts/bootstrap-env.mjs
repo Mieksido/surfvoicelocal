@@ -11,7 +11,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, execFileSync } from 'node:child_process';
 
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
 const args = new Set(process.argv.slice(2));
@@ -72,8 +72,18 @@ function ensureVenv(dir, py, reqFile, label) {
   if (!fs.existsSync(reqFile)) { log(`[bootstrap] 跳过 ${label}：没有 ${reqFile}`); return true; }
   log(`[bootstrap] 安装 ${label} 依赖（${path.basename(reqFile)}），首次可能要几分钟…`);
   if (checkOnly) return true;
-  if (!run([existing], ['-m', 'pip', 'install', '--upgrade', 'pip'])) log('[bootstrap] pip 升级失败（继续）');
-  if (!run([existing], ['-m', 'pip', 'install', '-r', reqFile])) throw new Error(`${label} 依赖安装失败`);
+  // pip 直连 pypi 在国内经常超时（2026-10-28 报告 #11）：失败就换镜像再试一轮。
+  const mirrors = ['', 'https://pypi.tuna.tsinghua.edu.cn/simple', 'https://mirrors.aliyun.com/pypi/simple'];
+  run([existing], ['-m', 'pip', 'install', '--upgrade', 'pip']);
+  let installed = false;
+  for (const mirror of mirrors) {
+    const args = ['-m', 'pip', 'install', '-r', reqFile];
+    if (mirror) args.push('-i', mirror, '--trusted-host', new URL(mirror).host);
+    log(`[bootstrap] ${label} 依赖安装（源：${mirror || 'pypi 官方'}）`);
+    if (run([existing], args)) { installed = true; break; }
+    log('[bootstrap] 这个源失败，换下一个…');
+  }
+  if (!installed) throw new Error(`${label} 依赖安装失败（官方源和国内镜像都试过了，检查网络/代理）`);
   return true;
 }
 
@@ -82,6 +92,37 @@ function ensureFfmpeg() {
   if (fs.existsSync(tool)) return true;
   log('[bootstrap] 缺 ffmpeg（可选：影响音频格式转换），跳过；需要时把 ffmpeg.exe 放进 tools/bin/');
   return true;
+}
+
+
+/** gsv.bat 需要 logs/gsv/tts_infer.yaml；仓库里没有，按有没有 NVIDIA 卡自动生成。 */
+function ensureGsvInferYaml() {
+  const out = path.join(root, 'logs', 'gsv', 'tts_infer.yaml');
+  if (fs.existsSync(out)) { log('[bootstrap] tts_infer.yaml 已存在，跳过'); return; }
+  const vendorCfg = path.join(root, 'vendor', 'GPT-SoVITS', 'code', 'GPT_SoVITS', 'configs', 'tts_infer.yaml');
+  let hasCuda = false;
+  try { execFileSync('nvidia-smi', ['-L'], { stdio: 'ignore', timeout: 8000 }); hasCuda = true; } catch {}
+  const device = hasCuda ? 'cuda' : 'cpu';
+  const half = hasCuda ? 'true' : 'false';
+  let text = '';
+  if (fs.existsSync(vendorCfg)) {
+    text = fs.readFileSync(vendorCfg, 'utf8');
+    text = text.replace(/device:\s*(cuda|cpu)/g, `device: ${device}`)
+               .replace(/is_half:\s*(true|false)/g, `is_half: ${half}`);
+  } else {
+    text = `custom:
+  bert_base_path: GPT_SoVITS/pretrained_models/chinese-roberta-wwm-ext-large
+  cnhuhbert_base_path: GPT_SoVITS/pretrained_models/chinese-hubert-base
+  device: ${device}
+  is_half: ${half}
+  t2s_weights_path: GPT_SoVITS/pretrained_models/gsv-v2final-pretrained/s1bert25hz-5kh-longer-epoch=12-step=369668.ckpt
+  version: v2
+  vits_weights_path: GPT_SoVITS/pretrained_models/gsv-v2final-pretrained/s2G2333k.pth
+`;
+  }
+  fs.mkdirSync(path.dirname(out), { recursive: true });
+  fs.writeFileSync(out, text, 'utf8');
+  log(`[bootstrap] 已生成 logs/gsv/tts_infer.yaml（device: ${device}）`);
 }
 
 try {
@@ -105,6 +146,7 @@ try {
     }
   }
   ensureFfmpeg();
+  ensureGsvInferYaml();
   log('[bootstrap] 完成');
 } catch (error) {
   console.error(`[bootstrap] 失败：${error?.message ?? error}`);
