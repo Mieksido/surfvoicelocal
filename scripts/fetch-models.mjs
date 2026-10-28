@@ -63,9 +63,8 @@ function download(url, dest) {
   }
 }
 
-/** 下载（或复用/续传）+ 校验一个资产 */
-function fetchAsset({ url, name, sha256: expectHash, size }) {
-  const dest = path.join(dlDir, name || path.basename(new URL(url).pathname) || 'archive');
+/** 单个文件：下载（可续传）→ 校验 → 返回路径。 */
+function fetchOne({ url, name, sha256: expectHash, size }, dest) {
   const wrongSize = size && fs.existsSync(dest) && fs.statSync(dest).size !== Number(size);
   if (!fs.existsSync(dest) || wrongSize) {
     if (checkOnly) { console.error(`✗ 缺 ${path.basename(dest)}`); return null; }
@@ -84,7 +83,6 @@ function fetchAsset({ url, name, sha256: expectHash, size }) {
   if (expectHash) {
     const actual = sha256(dest);
     if (actual.toLowerCase() !== String(expectHash).toLowerCase()) {
-      // 续传拼接坏了 / 远端换了文件：删掉重下一次（只重试一次，避免死循环）
       console.error(`✗ ${path.basename(dest)} 校验失败（${actual.slice(0, 12)}…），删除后重下一次`);
       try { fs.rmSync(dest, { force: true }); fs.rmSync(`${dest}.part`, { force: true }); } catch {}
       if (!download(url, dest)) return null;
@@ -96,6 +94,57 @@ function fetchAsset({ url, name, sha256: expectHash, size }) {
     }
   }
   console.log(`✓ ${path.basename(dest)} ${size ? human(Number(size)) : ''}`);
+  return dest;
+}
+
+/**
+ * 一个资产：可以是单文件，也可以是**分卷**（`parts: [...]`）。
+ * 分卷会逐卷下载（各自断点续传）→ 按顺序拼接 → 用整体 sha256 校验。
+ * 分卷的意义：1.84GB 单文件断了要重来一大段；460MB 一卷，断了只补一卷。
+ */
+function fetchAsset(item) {
+  const dest = path.join(dlDir, item.name || path.basename(new URL(item.url || 'x').pathname) || 'archive');
+  const parts = Array.isArray(item.parts) ? item.parts : [];
+  if (!parts.length) return fetchOne(item, dest);
+
+  const got = [];
+  for (const [i, part] of parts.entries()) {
+    const partName = `${item.name}.p${String(i + 1).padStart(2, '0')}`;
+    const partDest = path.join(dlDir, partName);
+    const file = fetchOne({ ...part, name: partName }, partDest);
+    if (!file) {
+      console.error(`✗ 分卷 ${i + 1}/${parts.length} 没准备好；已下载的分卷会留着，重跑继续`);
+      return null;
+    }
+    got.push(file);
+  }
+  if (checkOnly) return dest;
+
+  // 拼接（分卷顺序必须严格一致）
+  const out = fs.openSync(dest, 'w');
+  for (const file of got) fs.writeSync(out, fs.readFileSync(file));
+  fs.closeSync(out);
+
+  const expectSize = Number(item.size) || 0;
+  if (expectSize && fs.statSync(dest).size !== expectSize) {
+    console.error(`✗ 合并后大小不对（${fs.statSync(dest).size} ≠ ${expectSize}），删除重来`);
+    try { fs.rmSync(dest, { force: true }); } catch {}
+    return null;
+  }
+  if (item.sha256) {
+    const actual = sha256(dest);
+    if (actual.toLowerCase() !== String(item.sha256).toLowerCase()) {
+      console.error(`✗ 合并后校验失败（${actual.slice(0, 12)}…），删除分卷与合并结果`);
+      try {
+        fs.rmSync(dest, { force: true });
+        for (const file of got) fs.rmSync(file, { force: true });
+      } catch {}
+      return null;
+    }
+  }
+  // 校验通过后清理分卷（用户不必为 1.84GB 多占一份空间）
+  for (const file of got) { try { fs.rmSync(file, { force: true }); } catch {} }
+  console.log(`✓ ${item.name} 分卷合并完成 ${human(fs.statSync(dest).size)}`);
   return dest;
 }
 
