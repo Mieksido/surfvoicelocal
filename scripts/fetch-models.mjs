@@ -17,7 +17,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 
 const args = process.argv.slice(2);
 const has = (name) => args.includes(`--${name}`);
@@ -37,6 +37,14 @@ if (!fs.existsSync(manifestFile)) {
 
 const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
 const dlDir = path.join(root, '.download');
+
+// 可选镜像：SURFCORE_GH_MIRROR=https://ghfast.top 之类。
+// 注意：镜像方能看到下载请求（内容本身有 sha256 校验，但不能保密）。
+const MIRROR = String(process.env.SURFCORE_GH_MIRROR || '').trim().replace(/\/+$/, '');
+function withMirror(url) {
+  if (!MIRROR || !/^https?:\/\//i.test(String(url || ''))) return url;
+  return `${MIRROR}/${url}`;
+}
 fs.mkdirSync(dlDir, { recursive: true });
 
 const sha256 = (file) => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -51,7 +59,7 @@ function download(url, dest) {
   const hasPart = fs.existsSync(part) && fs.statSync(part).size > 0;
   const args = ['-L', '--fail', '--retry', '3', '--retry-delay', '2', '--progress-bar'];
   if (hasPart) args.push('-C', '-');
-  args.push('-o', part, url);
+  args.push('-o', part, withMirror(url));
   try {
     if (hasPart) console.log(`续传 ${path.basename(dest)}（已有 ${human(fs.statSync(part).size)}）`);
     execFileSync('curl', args, { stdio: 'inherit' });
@@ -61,6 +69,63 @@ function download(url, dest) {
     // 保留 .part，下次继续；不删，删了就白下了
     return false;
   }
+}
+
+/**
+ * 并发下载（分卷用）：同时跑 N 个 curl，各自断点续传；进度按总字节数汇总。
+ * 单连接在国内常被限速，分卷并发通常能快 2~4 倍。
+ */
+function downloadManyConcurrently(items, { jobs = 3 } = {}) {
+  const total = items.reduce((sum, it) => sum + (Number(it.size) || 0), 0);
+  const states = items.map((it) => {
+    const part = `${it.dest}.part`;
+    return { ...it, part, done: fs.existsSync(it.dest), bytes: fs.existsSync(part) ? fs.statSync(part).size : 0 };
+  });
+  const queue = states.filter((s) => !s.done);
+  if (!queue.length) return { ok: true, results: states };
+
+  let lastPct = -1;
+  const timer = setInterval(() => {
+    const got = states.reduce((sum, s) => sum + (s.done ? (Number(s.size) || 0) : (fs.existsSync(s.part) ? fs.statSync(s.part).size : 0)), 0);
+    const pct = total ? Math.min(99, Math.floor((got / total) * 100)) : 0;
+    if (pct !== lastPct) {
+      lastPct = pct;
+      process.stdout.write(`\r下载中 ${pct}% (${human(got)}${total ? ' / ' + human(total) : ''})   `);
+    }
+  }, 700);
+
+  return new Promise((resolve) => {
+    let running = 0;
+    let failed = false;
+    const finish = () => {
+      clearInterval(timer);
+      process.stdout.write('\n');
+      resolve({ ok: !failed, results: states });
+    };
+    const next = () => {
+      if (failed) return;
+      if (!queue.length && running === 0) return finish();
+      while (running < jobs && queue.length) {
+        const item = queue.shift();
+        running += 1;
+        const args = ['-L', '--fail', '--retry', '3', '--retry-delay', '2', '-sS'];
+        if (fs.existsSync(item.part) && fs.statSync(item.part).size > 0) args.push('-C', '-');
+        args.push('-o', item.part, withMirror(item.url));
+        const child = spawn('curl', args, { stdio: 'ignore', windowsHide: true });
+        child.on('exit', (code) => {
+          running -= 1;
+          if (code === 0) {
+            try { fs.renameSync(item.part, item.dest); item.done = true; } catch { failed = true; }
+          } else {
+            failed = true; // 保留 .part，下次续传
+          }
+          next();
+        });
+        child.on('error', () => { running -= 1; failed = true; next(); });
+      }
+    };
+    next();
+  });
 }
 
 /** 单个文件：下载（可续传）→ 校验 → 返回路径。 */
@@ -102,23 +167,36 @@ function fetchOne({ url, name, sha256: expectHash, size }, dest) {
  * 分卷会逐卷下载（各自断点续传）→ 按顺序拼接 → 用整体 sha256 校验。
  * 分卷的意义：1.84GB 单文件断了要重来一大段；460MB 一卷，断了只补一卷。
  */
-function fetchAsset(item) {
+async function fetchAsset(item) {
   const dest = path.join(dlDir, item.name || path.basename(new URL(item.url || 'x').pathname) || 'archive');
   const parts = Array.isArray(item.parts) ? item.parts : [];
   if (!parts.length) return fetchOne(item, dest);
 
-  const got = [];
+  // 分卷并发下载（默认 3 路）：单连接常被限速，并发通常快 2~4 倍。
+  const jobs = Math.max(1, Math.min(6, Number(process.env.SURFCORE_DOWNLOAD_JOBS) || 3));
+  if (checkOnly) {
+    const missing = parts.filter((_, i) => !fs.existsSync(path.join(dlDir, `${item.name}.p${String(i + 1).padStart(2, '0')}`)));
+    if (missing.length) { console.error(`✗ ${item.name} 缺 ${missing.length} 个分卷`); return null; }
+    return dest;
+  }
+  const jobsList = parts.map((part, i) => {
+    const partName = `${item.name}.p${String(i + 1).padStart(2, '0')}`;
+    return { url: part.url, size: part.size, dest: path.join(dlDir, partName) };
+  });
+  const res = await downloadManyConcurrently(jobsList, { jobs });
+  if (!res.ok) {
+    console.error(`✗ ${item.name} 有分卷没下完；已下载的分卷会留着，重跑会续传`);
+    return null;
+  }
+  const got = res.results.map((r) => r.dest);
   for (const [i, part] of parts.entries()) {
     const partName = `${item.name}.p${String(i + 1).padStart(2, '0')}`;
     const partDest = path.join(dlDir, partName);
-    const file = fetchOne({ ...part, name: partName }, partDest);
-    if (!file) {
-      console.error(`✗ 分卷 ${i + 1}/${parts.length} 没准备好；已下载的分卷会留着，重跑继续`);
+    if (part.size && fs.statSync(partDest).size !== Number(part.size)) {
+      console.error(`✗ 分卷 ${i + 1} 大小不对（${fs.statSync(partDest).size} ≠ ${part.size}）`);
       return null;
     }
-    got.push(file);
   }
-  if (checkOnly) return dest;
 
   // 拼接（分卷顺序必须严格一致）
   const out = fs.openSync(dest, 'w');
@@ -171,7 +249,7 @@ let failed = false;
 
 if (Array.isArray(manifest.archives) && manifest.archives.length) {
   for (const [i, item] of manifest.archives.entries()) {
-    const file = fetchAsset(item);
+    const file = await fetchAsset(item);
     if (!file) { failed = true; continue; }
     if (checkOnly) continue;
     console.log(`解压 ${item.name} …`);
@@ -182,7 +260,7 @@ if (Array.isArray(manifest.archives) && manifest.archives.length) {
   if (!parts.length) { console.error('models.json 里既没有 archives 也没有 parts'); process.exit(2); }
   const downloaded = [];
   for (const [i, part] of parts.entries()) {
-    const file = fetchAsset({ ...part, name: `part-${String(i + 1).padStart(2, '0')}` });
+    const file = await fetchAsset({ ...part, name: `part-${String(i + 1).padStart(2, '0')}` });
     if (!file) { failed = true; break; }
     downloaded.push(file);
   }
