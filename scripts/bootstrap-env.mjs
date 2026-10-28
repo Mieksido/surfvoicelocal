@@ -72,12 +72,16 @@ function ensureVenv(dir, py, reqFile, label) {
   if (!fs.existsSync(reqFile)) { log(`[bootstrap] 跳过 ${label}：没有 ${reqFile}`); return true; }
   log(`[bootstrap] 安装 ${label} 依赖（${path.basename(reqFile)}），首次可能要几分钟…`);
   if (checkOnly) return true;
-  // pip 直连 pypi 在国内经常超时（2026-10-28 报告 #11）：失败就换镜像再试一轮。
-  const mirrors = ['', 'https://pypi.tuna.tsinghua.edu.cn/simple', 'https://mirrors.aliyun.com/pypi/simple'];
-  run([existing], ['-m', 'pip', 'install', '--upgrade', 'pip']);
+  // 国内默认走清华源（pip 直连 pypi 经常几十 KB/s，装 torch 会等到天荒地老，2026-10-28 反馈）。
+  // 可用 SURFCORE_PIP_INDEX 覆盖；--progress-bar off 让日志按"包名+大小"逐行输出，宿主能显示最近动作。
+  const custom = String(process.env.SURFCORE_PIP_INDEX || '').trim();
+  const mirrors = custom
+    ? [custom, '']
+    : ['https://pypi.tuna.tsinghua.edu.cn/simple', 'https://mirrors.aliyun.com/pypi/simple', ''];
+  run([existing], ['-m', 'pip', 'install', '--upgrade', 'pip', '--progress-bar', 'off']);
   let installed = false;
   for (const mirror of mirrors) {
-    const args = ['-m', 'pip', 'install', '-r', reqFile];
+    const args = ['-m', 'pip', 'install', '-r', reqFile, '--progress-bar', 'off', '--timeout', '30', '--retries', '5'];
     if (mirror) args.push('-i', mirror, '--trusted-host', new URL(mirror).host);
     log(`[bootstrap] ${label} 依赖安装（源：${mirror || 'pypi 官方'}）`);
     if (run([existing], args)) { installed = true; break; }
