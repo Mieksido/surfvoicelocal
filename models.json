@@ -25,19 +25,22 @@
           "url": "https://github.com/Mieksido/surfvoicelocal/releases/download/v0.1.0/voice-local-vendor-part-03",
           "size": 394011364
         }
-      ]
+      ],
+      "dest": "."
     },
     {
       "name": "voice-local-models.tar.gz",
       "url": "https://github.com/Mieksido/surfvoicelocal/releases/download/v0.1.0/voice-local-models.tar.gz",
       "sha256": "11ab078049e61e94483085d3418d217fdf81c5edd66c2bb5a66aac1aeeb3e111",
-      "size": 58395536
+      "size": 58395536,
+      "dest": "models"
     },
     {
       "name": "voice-local-voicepack.tar.gz",
       "url": "https://github.com/Mieksido/surfvoicelocal/releases/download/v0.1.0/voice-local-voicepack.tar.gz",
       "sha256": "76b0974be2cd82afda9505590b0a7f782829198d6328d652b2fdc674b0253a44",
-      "size": 2551407
+      "size": 2551407,
+      "dest": "."
     }
   ]
 }

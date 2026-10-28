@@ -81,7 +81,7 @@ function ensureVenv(dir, py, reqFile, label) {
   run([existing], ['-m', 'pip', 'install', '--upgrade', 'pip', '--progress-bar', 'off']);
   let installed = false;
   for (const mirror of mirrors) {
-    const args = ['-m', 'pip', 'install', '-r', reqFile, '--progress-bar', 'off', '--timeout', '30', '--retries', '5'];
+    const args = ['-m', 'pip', 'install', '-r', reqFile, '--progress-bar', 'off', '--timeout', '30', '--retries', '5', '--cache-dir', path.join(root, '.pip-cache')];
     if (mirror) args.push('-i', mirror, '--trusted-host', new URL(mirror).host);
     log(`[bootstrap] ${label} 依赖安装（源：${mirror || 'pypi 官方'}）`);
     if (run([existing], args)) { installed = true; break; }
@@ -98,6 +98,62 @@ function ensureFfmpeg() {
   return true;
 }
 
+
+
+/** 找 venv 的 site-packages 目录 */
+function sitePackages(venvDir) {
+  const py = venvPython(venvDir);
+  const r = spawnSync(py, ['-c', 'import site;print(site.getsitepackages()[0])'], { encoding: 'utf8' });
+  const dir = String(r.stdout || '').trim().split(String.fromCharCode(10)).pop().trim();
+  return dir || '';
+}
+
+/**
+ * GPT-SoVITS 直接 `import jieba_fast`，而 Windows 上装不了（C 扩展要编译）。
+ * 造一个转发到 jieba 的替身模块，比让用户装 VS Build Tools 现实得多（2026-10-28 报告 #8）。
+ */
+function ensureJiebaFastShim(venvDir) {
+  const sp = sitePackages(venvDir);
+  if (!sp) { log('[bootstrap] 找不到 site-packages，跳过 jieba_fast 替身'); return; }
+  const dir = path.join(sp, 'jieba_fast');
+  const NL = String.fromCharCode(10);
+  const init = [
+    '# SurfCore: jieba_fast 的纯 Python 替身（Windows 上 jieba_fast 无法编译）',
+    'import jieba as _jieba',
+    'from jieba import *',
+    'def setLogLevel(*a, **k):',
+    '    return None',
+    'def __getattr__(name):',
+    '    return getattr(_jieba, name)',
+    '',
+  ].join(NL);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, '__init__.py'), init, 'utf8');
+    fs.writeFileSync(path.join(dir, 'posseg.py'), 'from jieba.posseg import *' + NL, 'utf8');
+    log('[bootstrap] 已安装 jieba_fast 替身（转发到 jieba）');
+  } catch (error) {
+    log(`[bootstrap] jieba_fast 替身写入失败：${error.message}`);
+  }
+}
+
+/** imageio-ffmpeg 自带 ffmpeg 二进制：把它写进 config.toml 的 [ffmpeg] path（仅当原来是空的）。 */
+function wireImageioFfmpeg(venvDir) {
+  const py = venvPython(venvDir);
+  const r = spawnSync(py, ['-c', 'import imageio_ffmpeg;print(imageio_ffmpeg.get_ffmpeg_exe())'], { encoding: 'utf8' });
+  const exe = String(r.stdout || '').trim().split(String.fromCharCode(10)).pop().trim();
+  if (!exe || !fs.existsSync(exe)) { log('[bootstrap] imageio-ffmpeg 不可用，跳过 ffmpeg 配置'); return; }
+  const cfg = path.join(root, 'config.toml');
+  try {
+    if (!fs.existsSync(cfg)) return;
+    const text = fs.readFileSync(cfg, 'utf8');
+    if (!/\[ffmpeg\]/.test(text)) return;
+    const next = text.replace(/(\[ffmpeg\][\s\S]*?path\s*=\s*)"[^"]*"/, `$1"${exe.split(String.fromCharCode(92)).join('/')}"`);
+    if (next !== text) { fs.writeFileSync(cfg, next, 'utf8'); log('[bootstrap] 已把 imageio-ffmpeg 写进 config.toml [ffmpeg] path'); }
+  } catch (error) {
+    log(`[bootstrap] 写 ffmpeg 配置失败：${error.message}`);
+  }
+}
 
 /** gsv.bat 需要 logs/gsv/tts_infer.yaml；仓库里没有，按有没有 NVIDIA 卡自动生成。 */
 function ensureGsvInferYaml() {
@@ -147,6 +203,8 @@ try {
       log('[bootstrap] 本机没有 3.12 及更低的 Python，跳过 GPT-SoVITS 环境（本地音色需要它；可先只用云端包）');
     } else {
       ensureVenv(path.join(root, '.venv-gsv'), pyGsv, reqGsv, 'GPT-SoVITS');
+      ensureJiebaFastShim(path.join(root, '.venv-gsv'));
+      wireImageioFfmpeg(path.join(root, '.venv-gsv'));
     }
   }
   ensureFfmpeg();

@@ -27,6 +27,8 @@ pyopenjtalk-prebuilt>=0.3
 # 2026-10-28 报告 #8：api_v2.py 还缺这些
 ffmpeg-python>=0.2
 pytorch-lightning>=2.0
+torchmetrics>=1.0
+imageio-ffmpeg>=0.5
 matplotlib>=3.7
 resampy>=0.4
 onnxruntime>=1.17

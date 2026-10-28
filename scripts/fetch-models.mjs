@@ -228,20 +228,21 @@ async function fetchAsset(item) {
 
 function toPosix(p) { return String(p).split(String.fromCharCode(92)).join("/"); }
 
-function extract(archive) {
-  fs.mkdirSync(root, { recursive: true });
+/** 解压到指定目录（不同归档落点不同：models 归档进 models/，vendor/voicepack 进包根）。 */
+function extract(archive, destDir = root) {
+  fs.mkdirSync(destDir, { recursive: true });
   const lower = archive.toLowerCase();
   if (lower.endsWith('.zip')) {
     if (process.platform === 'win32') {
       execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-        `Expand-Archive -LiteralPath '${archive.replace(/'/g, "''")}' -DestinationPath '${root.replace(/'/g, "''")}' -Force`], { stdio: 'inherit' });
+        `Expand-Archive -LiteralPath '${archive.replace(/'/g, "''")}' -DestinationPath '${destDir.replace(/'/g, "''")}' -Force`], { stdio: 'inherit' });
     } else {
-      execFileSync('unzip', ['-o', '-q', toPosix(archive), '-d', toPosix(root)], { stdio: 'inherit' });
+      execFileSync('unzip', ['-o', '-q', toPosix(archive), '-d', toPosix(destDir)], { stdio: 'inherit' });
     }
   } else {
     // GNU tar 会把 'D:/...' 当成远程主机（host:path），必须用相对路径 + cwd。
-    const rel = path.relative(root, archive) || path.basename(archive);
-    execFileSync('tar', ['-xzf', toPosix(rel), '-C', '.'], { cwd: root, stdio: 'inherit' });
+    const rel = path.relative(destDir, archive) || path.basename(archive);
+    execFileSync('tar', ['-xzf', toPosix(rel), '-C', '.'], { cwd: destDir, stdio: 'inherit' });
   }
 }
 
@@ -252,8 +253,12 @@ if (Array.isArray(manifest.archives) && manifest.archives.length) {
     const file = await fetchAsset(item);
     if (!file) { failed = true; continue; }
     if (checkOnly) continue;
-    console.log(`解压 ${item.name} …`);
-    extract(file);
+    // dest：'models'（默认，piper 模型）或 '.'（vendor/voices/voicepack 必须在包根，
+    // 因为 gsv.bat 用 %~dp0vendor、voxd 用包根的 voices/ 与 voicepack/）。
+    const destRel = String(item.dest ?? 'models');
+    const destDir = path.resolve(destRel);
+    console.log(`解压 ${item.name} → ${destRel} …`);
+    extract(file, destDir);
   }
 } else {
   const parts = Array.isArray(manifest.parts) ? manifest.parts : [];
