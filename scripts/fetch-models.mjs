@@ -42,29 +42,57 @@ fs.mkdirSync(dlDir, { recursive: true });
 const sha256 = (file) => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const human = (n) => `${(n / 1024 / 1024).toFixed(1)}MB`;
 
+/**
+ * 下载（支持断点续传）：先写 <dest>.part，curl -C - 续传，完成后改名为 dest。
+ * 1.84GB 的 vendor 在国内经常中断，每次都从头来是不可接受的（2026-10-28 反馈）。
+ */
 function download(url, dest) {
+  const part = `${dest}.part`;
+  const hasPart = fs.existsSync(part) && fs.statSync(part).size > 0;
+  const args = ['-L', '--fail', '--retry', '3', '--retry-delay', '2', '--progress-bar'];
+  if (hasPart) args.push('-C', '-');
+  args.push('-o', part, url);
   try {
-    execFileSync('curl', ['-L', '--fail', '--retry', '2', '-o', dest, url], { stdio: 'inherit' });
+    if (hasPart) console.log(`续传 ${path.basename(dest)}（已有 ${human(fs.statSync(part).size)}）`);
+    execFileSync('curl', args, { stdio: 'inherit' });
+    fs.renameSync(part, dest);
     return true;
   } catch {
+    // 保留 .part，下次继续；不删，删了就白下了
     return false;
   }
 }
 
-/** 下载（或复用）+ 校验一个资产 */
+/** 下载（或复用/续传）+ 校验一个资产 */
 function fetchAsset({ url, name, sha256: expectHash, size }) {
   const dest = path.join(dlDir, name || path.basename(new URL(url).pathname) || 'archive');
   const wrongSize = size && fs.existsSync(dest) && fs.statSync(dest).size !== Number(size);
   if (!fs.existsSync(dest) || wrongSize) {
     if (checkOnly) { console.error(`✗ 缺 ${path.basename(dest)}`); return null; }
     console.log(`下载 ${url}`);
-    if (!download(url, dest)) { console.error(`✗ 下载失败：${url}`); return null; }
+    if (!download(url, dest)) {
+      const part = `${dest}.part`;
+      const got = fs.existsSync(part) ? human(fs.statSync(part).size) : '0MB';
+      console.error(`✗ 下载中断：${url}（已下 ${got}，保留 .part，下次会续传）`);
+      return null;
+    }
+  }
+  if (size && fs.statSync(dest).size !== Number(size)) {
+    console.error(`✗ ${path.basename(dest)} 大小不对（${fs.statSync(dest).size} ≠ ${size}）`);
+    return null;
   }
   if (expectHash) {
     const actual = sha256(dest);
     if (actual.toLowerCase() !== String(expectHash).toLowerCase()) {
-      console.error(`✗ ${path.basename(dest)} 校验失败（${actual.slice(0, 12)}…）`);
-      return null;
+      // 续传拼接坏了 / 远端换了文件：删掉重下一次（只重试一次，避免死循环）
+      console.error(`✗ ${path.basename(dest)} 校验失败（${actual.slice(0, 12)}…），删除后重下一次`);
+      try { fs.rmSync(dest, { force: true }); fs.rmSync(`${dest}.part`, { force: true }); } catch {}
+      if (!download(url, dest)) return null;
+      const again = sha256(dest);
+      if (again.toLowerCase() !== String(expectHash).toLowerCase()) {
+        console.error(`✗ 重下仍然校验失败：${path.basename(dest)}`);
+        return null;
+      }
     }
   }
   console.log(`✓ ${path.basename(dest)} ${size ? human(Number(size)) : ''}`);
