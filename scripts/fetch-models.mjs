@@ -17,7 +17,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 
 const args = process.argv.slice(2);
 const has = (name) => args.includes(`--${name}`);
@@ -94,11 +94,26 @@ function downloadManyConcurrently(items, { jobs = 3 } = {}) {
     }
   }, 700);
 
+  let running = 0;
+  let failed = false;
+
+  // 看门狗：分卷可能网络假死时永远停在某个百分比。4 分钟总字节没涨 → 杀 curl，按失败处理（下次续传）。
+  let lastBytes = -1;
+  let lastChangeAt = Date.now();
+  const watchdog = setInterval(() => {
+    const got = states.reduce((sum, s) => sum + (s.done ? (Number(s.size) || 0) : (fs.existsSync(s.part) ? fs.statSync(s.part).size : 0)), 0);
+    if (got !== lastBytes) { lastBytes = got; lastChangeAt = Date.now(); return; }
+    if (Date.now() - lastChangeAt > 4 * 60_000) {
+      console.log('[download] 4 分钟没有进展，判定卡住：结束本次下载（已下载分卷保留，下次续传）');
+      try { spawnSync('taskkill', ['/IM', 'curl.exe', '/T', '/F'], { stdio: 'ignore' }); } catch {}
+      failed = true;
+    }
+  }, 15_000);
+
   return new Promise((resolve) => {
-    let running = 0;
-    let failed = false;
     const finish = () => {
       clearInterval(timer);
+      clearInterval(watchdog);
       process.stdout.write('\n');
       resolve({ ok: !failed, results: states });
     };

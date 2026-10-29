@@ -24,7 +24,7 @@ cosy_url = "http://127.0.0.1:8766"
 gsv_url = "http://127.0.0.1:9880"    # GPT-SoVITS 微调版（本地，1 秒出声）
 warmup = ["gsv"]                  # 启动后后台空跑一次，消除第一条的 4~6 秒预热
 # 云端：火山「豆包声音复刻模型 2.0」。resource id 必须是 seed-icl-2.0
-cloud_app_id = "3773727341"
+cloud_app_id = ""              # 你自己的火山 AppID（不预置任何凭据）
 cloud_access_key = ""
 cloud_resource = "seed-icl-2.0"
 # 双引擎分流（默认关闭）：带 [语气] 标签且不超过这么多字的句子优先用 CosyVoice。
